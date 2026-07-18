@@ -238,6 +238,7 @@ fn validate_email(label: &str, email: &str) -> Result<()> {
 fn account_exists(username: &str) -> Result<bool> {
     let status = Command::new("getent")
         .args(["passwd", username])
+        .stdout(Stdio::null())
         .status()
         .context("run getent")?;
     match status.code() {
@@ -291,10 +292,13 @@ fn user_info(username: &str) -> Result<()> {
 
     let home = open_home_directory(username)?;
     let signup_email = read_xattr_string(&home, SIGNUP_EMAIL_XATTR, username)?;
-    let recovery_email = read_xattr_string(&home, RECOVERY_EMAIL_XATTR, username)?;
+    let recovery_email = read_optional_xattr_string(&home, RECOVERY_EMAIL_XATTR, username)?;
     println!("username: {username}");
     println!("signup email: {signup_email}");
-    println!("recovery email: {recovery_email}");
+    println!(
+        "recovery email: {}",
+        recovery_email.as_deref().unwrap_or("(not set)")
+    );
     Ok(())
 }
 
@@ -353,11 +357,16 @@ fn restore_xattr(file: &File, name: &str, previous: Option<&[u8]>) -> std::io::R
 }
 
 fn read_xattr_string(file: &File, name: &str, username: &str) -> Result<String> {
-    let value = file
-        .get_xattr(name)
+    read_optional_xattr_string(file, name, username)?
+        .ok_or_else(|| anyhow!("{name} is not set for {username}"))
+}
+
+fn read_optional_xattr_string(file: &File, name: &str, username: &str) -> Result<Option<String>> {
+    file.get_xattr(name)
         .with_context(|| format!("read {name} for {username}"))?
-        .ok_or_else(|| anyhow!("{name} is not set for {username}"))?;
-    String::from_utf8(value).with_context(|| format!("{name} for {username} is not valid UTF-8"))
+        .map(String::from_utf8)
+        .transpose()
+        .with_context(|| format!("{name} for {username} is not valid UTF-8"))
 }
 
 fn open_home_directory(username: &str) -> Result<File> {
