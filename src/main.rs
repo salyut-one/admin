@@ -90,7 +90,7 @@ enum UserInfoCommand {
         #[arg(long)]
         signup: String,
         #[arg(long)]
-        recovery: String,
+        recovery: Option<String>,
         username: String,
     },
 }
@@ -163,7 +163,7 @@ fn main() -> Result<()> {
                         username,
                     }),
                     None,
-                ) => set_user_emails(&username, &signup, &recovery),
+                ) => set_user_emails(&username, &signup, recovery.as_deref()),
                 (None, None) => bail!("username is required"),
                 (Some(_), Some(_)) => bail!("username must follow the info subcommand"),
             },
@@ -307,10 +307,12 @@ fn store_user_emails(username: &str, signup_email: &str, recovery_email: &str) -
     Ok(())
 }
 
-fn set_user_emails(username: &str, signup_email: &str, recovery_email: &str) -> Result<()> {
+fn set_user_emails(username: &str, signup_email: &str, recovery_email: Option<&str>) -> Result<()> {
     validate_username(username)?;
     validate_email("signup", signup_email)?;
-    validate_email("recovery", recovery_email)?;
+    if let Some(recovery_email) = recovery_email {
+        validate_email("recovery", recovery_email)?;
+    }
     ensure!(
         account_exists(username)?,
         "account does not exist: {username}"
@@ -323,7 +325,9 @@ fn set_user_emails(username: &str, signup_email: &str, recovery_email: &str) -> 
     home.set_xattr(SIGNUP_EMAIL_XATTR, signup_email.as_bytes())
         .with_context(|| format!("set {SIGNUP_EMAIL_XATTR} for {username}"))?;
 
-    if let Err(error) = home.set_xattr(RECOVERY_EMAIL_XATTR, recovery_email.as_bytes()) {
+    if let Some(recovery_email) = recovery_email
+        && let Err(error) = home.set_xattr(RECOVERY_EMAIL_XATTR, recovery_email.as_bytes())
+    {
         let rollback = restore_xattr(&home, SIGNUP_EMAIL_XATTR, previous_signup.as_deref());
         return match rollback {
             Ok(()) => Err(error).with_context(|| {
@@ -922,6 +926,26 @@ mod tests {
                     username: None,
                 }
             } if username == "rose"
+        ));
+
+        let parsed_without_recovery = Cli::try_parse_from([
+            "salyut-admin",
+            "user",
+            "info",
+            "set",
+            "--signup",
+            "rose@example.com",
+            "rose",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed_without_recovery.command,
+            TopCommand::User {
+                command: UserCommand::Info {
+                    command: Some(UserInfoCommand::Set { recovery: None, .. }),
+                    username: None,
+                }
+            }
         ));
     }
 
