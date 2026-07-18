@@ -35,6 +35,15 @@ Retrieve them with:
 sudo salyut-admin user info rose
 ```
 
+Set or replace both addresses for an existing account:
+
+```sh
+sudo salyut-admin user info set \
+  --signup 'rose@example.com' \
+  --recovery 'rose-recovery@example.net' \
+  rose
+```
+
 Repair ownership, modes, missing files, and profile links without replacing
 user content:
 

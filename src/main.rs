@@ -65,8 +65,13 @@ enum UserCommand {
         #[arg(long)]
         recovery_email: String,
     },
-    /// Display the signup and recovery email addresses for an account.
-    Info { username: String },
+    /// Display or set the signup and recovery email addresses for an account.
+    Info {
+        #[command(subcommand)]
+        command: Option<UserInfoCommand>,
+        /// Account to inspect when no info subcommand is given.
+        username: Option<String>,
+    },
     /// Remove an account and its Salyut-managed data.
     Delete {
         username: String,
@@ -76,6 +81,18 @@ enum UserCommand {
     },
     /// Restore the expected Salyut ownership, modes, files, and links.
     Repair { username: String },
+}
+
+#[derive(Subcommand)]
+enum UserInfoCommand {
+    /// Set the signup and recovery email addresses for an existing account.
+    Set {
+        #[arg(long)]
+        signup: String,
+        #[arg(long)]
+        recovery: String,
+        username: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -137,7 +154,19 @@ fn main() -> Result<()> {
                 signup_email,
                 recovery_email,
             } => add_user(&username, &ssh_public_key, &signup_email, &recovery_email),
-            UserCommand::Info { username } => user_info(&username),
+            UserCommand::Info { command, username } => match (command, username) {
+                (None, Some(username)) => user_info(&username),
+                (
+                    Some(UserInfoCommand::Set {
+                        signup,
+                        recovery,
+                        username,
+                    }),
+                    None,
+                ) => set_user_emails(&username, &signup, &recovery),
+                (None, None) => bail!("username is required"),
+                (Some(_), Some(_)) => bail!("username must follow the info subcommand"),
+            },
             UserCommand::Delete { username, yes } => delete_user(&username, yes),
             UserCommand::Repair { username } => repair_user(&username),
         },
@@ -276,6 +305,47 @@ fn store_user_emails(username: &str, signup_email: &str, recovery_email: &str) -
     home.set_xattr(RECOVERY_EMAIL_XATTR, recovery_email.as_bytes())
         .with_context(|| format!("set {RECOVERY_EMAIL_XATTR} for {username}"))?;
     Ok(())
+}
+
+fn set_user_emails(username: &str, signup_email: &str, recovery_email: &str) -> Result<()> {
+    validate_username(username)?;
+    validate_email("signup", signup_email)?;
+    validate_email("recovery", recovery_email)?;
+    ensure!(
+        account_exists(username)?,
+        "account does not exist: {username}"
+    );
+
+    let home = open_home_directory(username)?;
+    let previous_signup = home
+        .get_xattr(SIGNUP_EMAIL_XATTR)
+        .with_context(|| format!("read {SIGNUP_EMAIL_XATTR} for {username}"))?;
+    home.set_xattr(SIGNUP_EMAIL_XATTR, signup_email.as_bytes())
+        .with_context(|| format!("set {SIGNUP_EMAIL_XATTR} for {username}"))?;
+
+    if let Err(error) = home.set_xattr(RECOVERY_EMAIL_XATTR, recovery_email.as_bytes()) {
+        let rollback = restore_xattr(&home, SIGNUP_EMAIL_XATTR, previous_signup.as_deref());
+        return match rollback {
+            Ok(()) => Err(error).with_context(|| {
+                format!("set {RECOVERY_EMAIL_XATTR} for {username}; restored previous signup email")
+            }),
+            Err(rollback_error) => Err(error).with_context(|| {
+                format!(
+                    "set {RECOVERY_EMAIL_XATTR} for {username}; failed to restore previous signup email: {rollback_error:#}"
+                )
+            }),
+        };
+    }
+
+    println!("updated email addresses: {username}");
+    Ok(())
+}
+
+fn restore_xattr(file: &File, name: &str, previous: Option<&[u8]>) -> std::io::Result<()> {
+    match previous {
+        Some(value) => file.set_xattr(name, value),
+        None => file.remove_xattr(name),
+    }
 }
 
 fn read_xattr_string(file: &File, name: &str, username: &str) -> Result<String> {
@@ -822,7 +892,35 @@ mod tests {
         assert!(matches!(
             parsed.command,
             TopCommand::User {
-                command: UserCommand::Info { username }
+                command: UserCommand::Info {
+                    command: None,
+                    username: Some(username),
+                }
+            } if username == "rose"
+        ));
+    }
+
+    #[test]
+    fn parses_user_info_set_command() {
+        let parsed = Cli::try_parse_from([
+            "salyut-admin",
+            "user",
+            "info",
+            "set",
+            "--signup",
+            "rose@example.com",
+            "--recovery",
+            "rose-recovery@example.net",
+            "rose",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            TopCommand::User {
+                command: UserCommand::Info {
+                    command: Some(UserInfoCommand::Set { username, .. }),
+                    username: None,
+                }
             } if username == "rose"
         ));
     }
