@@ -22,7 +22,17 @@ Create an account and print its generated password once:
 
 ```sh
 sudo salyut-admin user add rose \
+  --signup-email 'rose@example.com' \
+  --recovery-email 'rose-recovery@example.net' \
   'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... rose@example'
+```
+
+The signup and recovery addresses are stored on the user's home directory as
+the root-only `trusted.signup` and `trusted.recovery` extended attributes.
+Retrieve them with:
+
+```sh
+sudo salyut-admin user info rose
 ```
 
 Repair ownership, modes, missing files, and profile links without replacing

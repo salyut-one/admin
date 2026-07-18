@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{Args, Parser, Subcommand};
+use xattr::FileExt;
 
 const SERVICES: &[Service] = &[
     Service::systemd("salyut-now", Some(("127.0.0.1:8081", "/healthz"))),
@@ -25,6 +26,8 @@ const SITE_ROOT: &str = "/srv/user_sites";
 const PROFILE_ROOT: &str = "/srv/user_profiles";
 const PASSWORD_LEN: usize = 24;
 const PASSWORD_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+const RECOVERY_EMAIL_XATTR: &str = "trusted.recovery";
+const SIGNUP_EMAIL_XATTR: &str = "trusted.signup";
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -55,7 +58,15 @@ enum UserCommand {
     Add {
         username: String,
         ssh_public_key: String,
+        /// Email address used to sign up for the account.
+        #[arg(long)]
+        signup_email: String,
+        /// Email address used for account recovery.
+        #[arg(long)]
+        recovery_email: String,
     },
+    /// Display the signup and recovery email addresses for an account.
+    Info { username: String },
     /// Remove an account and its Salyut-managed data.
     Delete {
         username: String,
@@ -123,7 +134,10 @@ fn main() -> Result<()> {
             UserCommand::Add {
                 username,
                 ssh_public_key,
-            } => add_user(&username, &ssh_public_key),
+                signup_email,
+                recovery_email,
+            } => add_user(&username, &ssh_public_key, &signup_email, &recovery_email),
+            UserCommand::Info { username } => user_info(&username),
             UserCommand::Delete { username, yes } => delete_user(&username, yes),
             UserCommand::Repair { username } => repair_user(&username),
         },
@@ -183,6 +197,15 @@ fn validate_ssh_key(key: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_email(label: &str, email: &str) -> Result<()> {
+    ensure!(!email.is_empty(), "{label} email address is empty");
+    ensure!(
+        !email.contains(['\n', '\r', '\0']),
+        "{label} email address must be one line"
+    );
+    Ok(())
+}
+
 fn account_exists(username: &str) -> Result<bool> {
     let status = Command::new("getent")
         .args(["passwd", username])
@@ -195,9 +218,11 @@ fn account_exists(username: &str) -> Result<bool> {
     }
 }
 
-fn add_user(username: &str, ssh_key: &str) -> Result<()> {
+fn add_user(username: &str, ssh_key: &str, signup_email: &str, recovery_email: &str) -> Result<()> {
     validate_username(username)?;
     validate_ssh_key(ssh_key)?;
+    validate_email("signup", signup_email)?;
+    validate_email("recovery", recovery_email)?;
     ensure!(
         !account_exists(username)?,
         "account already exists: {username}"
@@ -207,6 +232,7 @@ fn add_user(username: &str, ssh_key: &str) -> Result<()> {
 
     let result: Result<()> = (|| {
         provision_user(username, Some(ssh_key))?;
+        store_user_emails(username, signup_email, recovery_email)?;
         let password = generate_password()?;
         set_password(username, &password)?;
         println!("created account: {username}");
@@ -225,6 +251,59 @@ fn add_user(username: &str, ssh_key: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn user_info(username: &str) -> Result<()> {
+    validate_username(username)?;
+    ensure!(
+        account_exists(username)?,
+        "account does not exist: {username}"
+    );
+
+    let home = open_home_directory(username)?;
+    let signup_email = read_xattr_string(&home, SIGNUP_EMAIL_XATTR, username)?;
+    let recovery_email = read_xattr_string(&home, RECOVERY_EMAIL_XATTR, username)?;
+    println!("username: {username}");
+    println!("signup email: {signup_email}");
+    println!("recovery email: {recovery_email}");
+    Ok(())
+}
+
+fn store_user_emails(username: &str, signup_email: &str, recovery_email: &str) -> Result<()> {
+    let home = open_home_directory(username)?;
+    home.set_xattr(SIGNUP_EMAIL_XATTR, signup_email.as_bytes())
+        .with_context(|| format!("set {SIGNUP_EMAIL_XATTR} for {username}"))?;
+    home.set_xattr(RECOVERY_EMAIL_XATTR, recovery_email.as_bytes())
+        .with_context(|| format!("set {RECOVERY_EMAIL_XATTR} for {username}"))?;
+    Ok(())
+}
+
+fn read_xattr_string(file: &File, name: &str, username: &str) -> Result<String> {
+    let value = file
+        .get_xattr(name)
+        .with_context(|| format!("read {name} for {username}"))?
+        .ok_or_else(|| anyhow!("{name} is not set for {username}"))?;
+    String::from_utf8(value).with_context(|| format!("{name} for {username} is not valid UTF-8"))
+}
+
+fn open_home_directory(username: &str) -> Result<File> {
+    let home = PathBuf::from("/home").join(username);
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(&home)
+        .with_context(|| {
+            format!(
+                "open home directory without following links: {}",
+                home.display()
+            )
+        })?;
+    ensure!(
+        directory.metadata()?.file_type().is_dir(),
+        "expected home directory does not exist: {}",
+        home.display()
+    );
+    Ok(directory)
 }
 
 fn repair_user(username: &str) -> Result<()> {
@@ -686,6 +765,66 @@ mod tests {
         for username in ["", "Root", "2user", "../root", "a.b", &"a".repeat(33)] {
             assert!(validate_username(username).is_err(), "{username:?}");
         }
+    }
+
+    #[test]
+    fn validates_email_values_for_xattrs() {
+        for email in ["rose@example.com", "rose+recovery@example.net"] {
+            validate_email("test", email).unwrap();
+        }
+        for email in [
+            "",
+            "rose@example.com\nsecond@example.com",
+            "rose\0@example.com",
+        ] {
+            assert!(validate_email("test", email).is_err(), "{email:?}");
+        }
+    }
+
+    #[test]
+    fn user_add_requires_both_email_options() {
+        let parsed = Cli::try_parse_from([
+            "salyut-admin",
+            "user",
+            "add",
+            "rose",
+            "ssh-ed25519 AAAA rose@example",
+            "--signup-email",
+            "rose@example.com",
+            "--recovery-email",
+            "rose-recovery@example.net",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            TopCommand::User {
+                command: UserCommand::Add { .. }
+            }
+        ));
+
+        assert!(
+            Cli::try_parse_from([
+                "salyut-admin",
+                "user",
+                "add",
+                "rose",
+                "ssh-ed25519 AAAA rose@example",
+                "--signup-email",
+                "rose@example.com",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_user_info_command() {
+        let parsed = Cli::try_parse_from(["salyut-admin", "user", "info", "rose"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            TopCommand::User {
+                command: UserCommand::Info { username }
+            } if username == "rose"
+        ));
     }
 
     #[test]
