@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: macOS checks
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+      - name: Check
+        run: make check CARGO="cargo +stable"
+
+  fedora:
+    name: Fedora 44 build and install
+    runs-on: ubuntu-latest
+    container: fedora:44
+
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install build tools
+        run: dnf install -y cargo gcc git make rust
+      - name: Build and test
+        run: |
+          make build
+          make test
+      - name: Check staged installation
+        run: |
+          make install DESTDIR="$PWD/pkgroot"
+          test -x pkgroot/sbin/salyut-admin
+          pkgroot/sbin/salyut-admin --help
