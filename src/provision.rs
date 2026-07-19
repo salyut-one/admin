@@ -8,7 +8,7 @@ use anyhow::{Context, Result, ensure};
 use crate::process;
 
 pub const USER_GROUP: &str = "salyut-bbs";
-const PROFILE_GROUP: &str = "salyut-bbs-web";
+const PROFILE_GROUP: &str = USER_GROUP;
 const SITE_ROOT: &str = "/srv/user_sites";
 const PROFILE_ROOT: &str = "/srv/user_profiles";
 
