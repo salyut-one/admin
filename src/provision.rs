@@ -9,6 +9,7 @@ use crate::process;
 
 pub const USER_GROUP: &str = "salyut-bbs";
 const PROFILE_GROUP: &str = USER_GROUP;
+const PROFILE_READER: &str = "salyut-web";
 const SITE_ROOT: &str = "/srv/user_sites";
 const PROFILE_ROOT: &str = "/srv/user_profiles";
 
@@ -21,6 +22,13 @@ pub fn apply(username: &str, ssh_key: Option<&str>) -> Result<()> {
         "expected home directory does not exist: {}",
         home.display()
     );
+
+    let profile_acl = format!("user:{PROFILE_READER}:--x");
+    process::run(
+        "setfacl",
+        ["--modify".as_ref(), profile_acl.as_ref(), home.as_os_str()],
+    )
+    .with_context(|| format!("allow {PROFILE_READER} to traverse {}", home.display()))?;
 
     let ssh_dir = home.join(".ssh");
     ensure_directory(&ssh_dir, 0o700, username, username)?;
