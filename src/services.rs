@@ -10,6 +10,7 @@ use crate::process;
 pub const ALL: &[Service] = &[
     Service::systemd("salyut-site", Some(("127.0.0.1:8082", "/healthz"))),
     Service::systemd("salyut-bbsd", None),
+    Service::systemd("salyut-bbs-mail", None),
     Service::systemd("postfix", None),
     Service::systemd("dovecot", None),
     Service::systemd("caddy", None),
